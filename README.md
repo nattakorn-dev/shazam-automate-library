@@ -32,11 +32,10 @@ version: "3.8"
 
 services:
   shazam-tagger:
-    image: docker_image
+    image: ghcr.io/nattakorn-dev/shazam-automate-library:latest
     container_name: music_tagger
     restart: unless-stopped
     volumes:
-      - /opt/Docker/MusicManagement/config:/config
       - path_to_watch:/music/watch
       - path_to_lib:/music/library
       - path_to_unmanage:/music/unmanage
