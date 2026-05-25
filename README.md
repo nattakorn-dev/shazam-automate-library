@@ -2,10 +2,15 @@
 Automate thai music library with shazam
 
 [Raw Audio Intake] ➡️  /music/watch    (Intake & Claim Phase)
+
 ⬇️
+
 [Shazam ID & Repair] ➡️  Processes metadata, fixes Thai text, embeds covers
+
 ⬇️
+
 [Successful Match]  ➡️  /music/library  (Final organized library structure)
+
 [Match Failed/Bad]  ➡️  /music/unmanage (Requires manual inspection)
 
 ### 📂 Directory Mapping
