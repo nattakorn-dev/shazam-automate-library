@@ -476,6 +476,7 @@ async def process_file(file_path, shazam, limiter, semaphore):
             out = await call_shazam_with_retries(shazam, locked_path, limiter)
             artist, title, album, genre, date = None, None, None, None, None
             cover_bytes = None
+            target_dir = TAG_DIR
 
             if 'track' in out:
                 track = out['track']
@@ -522,6 +523,7 @@ async def process_file(file_path, shazam, limiter, semaphore):
                             album = repair_thai_encoding(audio_orig.get('album', [title])[0])
                             genre = repair_thai_encoding(audio_orig.get('genre', [''])[0])
                             date = repair_thai_encoding(audio_orig.get('date', [''])[0])
+                            target_dir = os.path.join(TAG_DIR, '_tag')
                             logger.info('File Tag RECOVERED successfully: %s - %s', artist, title)
                         else:
                             logger.warning('Tag unreadable or missing after repair attempt: %s', filename_only)
@@ -540,7 +542,7 @@ async def process_file(file_path, shazam, limiter, semaphore):
                     embed_artwork(locked_path, cover_bytes)
 
                 logger.info('Success Processing: %s - %s', artist, title)
-                move_with_dedup(locked_path, artist, final_album, title, TAG_DIR, cover_bytes)
+                move_with_dedup(locked_path, artist, final_album, title, target_dir, cover_bytes)
             else:
                 # ถ้าซ่อมไม่สำเร็จ หรือไม่มีข้อมูลจริง ๆ ส่งไป Unmanage
                 logger.warning('Unmanageable (No tag or recovery failed): %s -> Moving to Unmanage', filename_only)
