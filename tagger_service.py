@@ -181,20 +181,30 @@ def embed_artwork(file_path, image_bytes):
         print(f"⚠️ Artwork embedding failed for {os.path.basename(file_path)}: {e}")
     return False
 
+def normalize_name_for_matching(name):
+    """
+    Normalize ชื่อโดยตัดช่องว่างทั้งหมดและ lowercase
+    เพื่อให้ Modern Dog กับ ModernDog ถือเป็นชื่อเดียวกัน
+    """
+    if not name:
+        return ""
+    return re.sub(r'\s+', '', str(name)).strip().lower()
+
+
 def find_existing_folder_case_insensitive(parent_dir, folder_name):
     """
     ค้นหา Folder artist/album ที่มีชื่อเดียวกัน 
-    โดยไม่สนใจตัวพิมพ์ใหญ่-เล็ก (SMB Compatible - Case-Insensitive)
+    โดยไม่สนใจตัวพิมพ์ใหญ่-เล็กและช่องว่าง (SMB Compatible - Case-Insensitive)
     """
     try:
         if not os.path.exists(parent_dir):
             return None
         
+        name_expected = normalize_name_for_matching(folder_name)
         for folder in os.listdir(parent_dir):
             folder_path = os.path.join(parent_dir, folder)
             if os.path.isdir(folder_path):
-                # เทียบชื่อโดยไม่สนใจตัวพิมพ์ใหญ่-เล็ก
-                if folder.lower() == folder_name.lower():
+                if normalize_name_for_matching(folder) == name_expected:
                     return folder_path
     except Exception:
         pass
@@ -209,10 +219,10 @@ def find_existing_file_case_insensitive(target_dir, title_safe):
         if not os.path.exists(target_dir):
             return None
         
+        expected_base = normalize_name_for_matching(title_safe)
         for file in os.listdir(target_dir):
             file_base = os.path.splitext(file)[0]
-            # เทียบชื่อโดยไม่สนใจตัวพิมพ์ใหญ่-เล็ก และนามสกุล
-            if file_base.lower() == title_safe.lower():
+            if normalize_name_for_matching(file_base) == expected_base:
                 full_path = os.path.join(target_dir, file)
                 if os.path.isfile(full_path):
                     return full_path
