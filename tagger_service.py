@@ -3,11 +3,14 @@ import os
 import shutil
 import re
 import logging
+import signal
 import time
 import random
 import requests
+from logging.handlers import RotatingFileHandler
 from aiohttp import web
 from datetime import datetime
+from dotenv import load_dotenv
 from shazamio import Shazam
 from mutagen import File
 from mutagen.mp3 import MP3
@@ -16,18 +19,61 @@ import mutagen.id3 as id3
 from mutagen.wave import WAVE
 from mutagen.mp4 import MP4
 
+# Load .env values if present
+load_dotenv()
+
 # Rate limit settings (seconds between Shazam API calls)
 SHAZAM_DELAY = float(os.getenv('SHAZAM_DELAY', '1.5'))
 SHAZAM_RETRIES = int(os.getenv('SHAZAM_RETRIES', '3'))
 
-# ปิด Log ของ Mutagen เพื่อความสะอาดของหน้าจอ
-logging.getLogger("mutagen").setLevel(logging.ERROR)
+# Service configuration
+WATCH_DIR = os.getenv('WATCH_DIR', '/music/watch')
+TAG_DIR = os.getenv('TAG_DIR', '/music/library')
+UNMANAGE_DIR = os.getenv('UNMANAGE_DIR', '/music/unmanage')
+INTERVAL = int(os.getenv('INTERVAL', '300'))
+LOG_FILE = os.getenv('LOG_FILE', '/logs/tagger_service.log')
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', '3'))
+HTTP_PORT = int(os.getenv('HTTP_PORT', '5000'))
 
-# --- Configuration ---
-WATCH_DIR = "/music/watch"
-TAG_DIR = "/music/library"
-UNMANAGE_DIR = "/music/unmanage"
-INTERVAL = 300
+# ปิด Log ของ Mutagen เพื่อความสะอาดของหน้าจอ
+logging.getLogger('mutagen').setLevel(logging.ERROR)
+logger = logging.getLogger('shazam_tagger')
+
+
+def setup_logging():
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', '%Y-%m-%d %H:%M:%S')
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+    log_dir = os.path.dirname(LOG_FILE)
+    if log_dir:
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8')
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+        except Exception as exc:
+            logger.warning('Unable to configure file logger %s: %s', LOG_FILE, exc)
+
+
+shutdown_event = asyncio.Event()
+
+
+def _shutdown_signal_handler(sig):
+    logger.info('Received shutdown signal: %s', sig.name if hasattr(sig, 'name') else sig)
+    shutdown_event.set()
+
+
+def configure_signal_handlers(loop):
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, lambda s=sig: _shutdown_signal_handler(s))
+        except NotImplementedError:
+            logger.warning('Signal handlers not supported on this platform: %s', sig)
+
 
 class AsyncRateLimiter:
     """ ระบบจัดคิวหน่วงเวลาแบบ Async เพื่อไม่ให้ส่งคำขอไปหาสะสมพร้อมกันเกินกำหนด (Rate Limit Protection) """
@@ -82,16 +128,34 @@ def is_valid_tag(text):
     return True
 
 async def health(request):
-    return web.json_response({"status": "ok", "service": "shazam-tagger", "time": datetime.utcnow().isoformat() + "Z"})
+    return web.json_response({
+        "status": "ok",
+        "service": "shazam-tagger",
+        "time": datetime.utcnow().isoformat() + "Z",
+        "watch_dir": WATCH_DIR,
+        "tag_dir": TAG_DIR,
+        "unmanage_dir": UNMANAGE_DIR,
+    })
 
 async def start_health_server():
     app = web.Application()
     app.add_routes([web.get('/health', health)])
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 5000)
+    site = web.TCPSite(runner, '0.0.0.0', HTTP_PORT)
     await site.start()
-    print('✅ Health endpoint listening on http://0.0.0.0:5000/health')
+    logger.info('Health endpoint listening on http://0.0.0.0:%s/health', HTTP_PORT)
+    return runner
+
+
+async def stop_health_server(runner):
+    if runner is None:
+        return
+    try:
+        await runner.cleanup()
+        logger.info('Health endpoint stopped')
+    except Exception as exc:
+        logger.warning('Unable to stop health endpoint cleanly: %s', exc)
 
 def get_audio_quality(file_path):
     """ ดึงค่า Bitrate และขนาดไฟล์เพื่อใช้เทียบคุณภาพ """
@@ -139,7 +203,7 @@ def _download_cover(url):
         if r.status_code == 200:
             return r.content
     except Exception as e:
-        print(f"⚠️ Failed to download cover art from {url}: {e}")
+        logger.warning('Failed to download cover art from %s: %s', url, e)
     return None
 
 def embed_artwork(file_path, image_bytes):
@@ -178,7 +242,7 @@ def embed_artwork(file_path, image_bytes):
             audio.save()
             return True
     except Exception as e:
-        print(f"⚠️ Artwork embedding failed for {os.path.basename(file_path)}: {e}")
+        logger.warning('Artwork embedding failed for %s: %s', os.path.basename(file_path), e)
     return False
 
 def normalize_name_for_matching(name):
@@ -255,30 +319,37 @@ def move_with_dedup(source_file, artist, album, title, target_base, cover_bytes=
     existing_file = find_existing_file_case_insensitive(target_dir, file_base)
 
     if existing_file:
-        print(f"🔍 Comparing quality for duplicate: {file_name}...")
+        logger.info('Comparing quality for duplicate: %s', file_name)
         curr_bitrate, curr_size = get_audio_quality(existing_file)
         new_bitrate, new_size = get_audio_quality(source_file)
 
         if (new_bitrate > curr_bitrate) or (new_bitrate == curr_bitrate and new_size > curr_size):
             existing_filename = os.path.basename(existing_file)
-            print(f"♻️ Replacing: {existing_filename} ({new_bitrate//1000}k > {curr_bitrate//1000}k)")
-            os.remove(existing_file)
+            logger.info('Replacing existing file %s with higher quality %s (%dk > %dk)', existing_filename, os.path.basename(source_file), new_bitrate//1000, curr_bitrate//1000)
+            try:
+                os.remove(existing_file)
+            except Exception as exc:
+                logger.warning('Unable to remove existing file %s: %s', existing_file, exc)
             shutil.move(source_file, target_path)
         else:
-            print(f"⏭️ Lower quality already exists. Skipping: {file_name}")
-            os.remove(source_file) 
+            logger.info('Lower quality already exists. Removing incoming file: %s', source_file)
+            try:
+                os.remove(source_file)
+            except Exception as exc:
+                logger.warning('Unable to remove lower quality source file %s: %s', source_file, exc)
     else:
-        print(f"🚚 Moving file: {source_file} -> {target_path}")
+        logger.info('Moving file: %s -> %s', source_file, target_path)
         shutil.move(source_file, target_path)
     
     if cover_bytes:
-        cover_path = os.path.join(target_dir, "cover.jpg")
+        cover_path = os.path.join(target_dir, 'cover.jpg')
         if not os.path.exists(cover_path):
             try:
-                with open(cover_path, 'wb') as f: f.write(cover_bytes)
-                print(f"🎨 Saved album art cover.jpg in: {target_dir}")
+                with open(cover_path, 'wb') as f:
+                    f.write(cover_bytes)
+                logger.info('Saved album art cover.jpg in: %s', target_dir)
             except Exception as e:
-                print(f"⚠️ Failed to save cover.jpg in {target_dir}: {e}")
+                logger.warning('Failed to save cover.jpg in %s: %s', target_dir, e)
     return target_path
 
 def safe_write_tags(file_path, artist, album, title, genre=None, date=None):
@@ -292,7 +363,7 @@ def safe_write_tags(file_path, artist, album, title, genre=None, date=None):
                 audio_clean.delete()
                 audio_clean.save()
         except Exception as e:
-            print(f"⚠️ Could not delete old tags for {os.path.basename(file_path)}: {e}")
+            logger.warning('Could not delete old tags for %s: %s', os.path.basename(file_path), e)
             
         audio = File(file_path, easy=True)
         if audio is not None:
@@ -304,7 +375,7 @@ def safe_write_tags(file_path, artist, album, title, genre=None, date=None):
             audio.save()
             return True
     except Exception as e:
-        print(f"⚠️ Easy tagging failed for {os.path.basename(file_path)}, trying specific format: {e}")
+        logger.warning('Easy tagging failed for %s, trying specific format: %s', os.path.basename(file_path), e)
 
     try:
         if ext == '.mp3':
@@ -355,24 +426,25 @@ def safe_write_tags(file_path, artist, album, title, genre=None, date=None):
             else:
                 raise ValueError("Unsupported format")
     except Exception as e:
-        print(f"❌ Failed all tagging fallback methods for {os.path.basename(file_path)}: {e}")
+        logger.warning('Failed all tagging fallback methods for %s: %s', os.path.basename(file_path), e)
         return False
 
 async def call_shazam_with_retries(shazam_client, path, limiter):
     backoff = SHAZAM_DELAY
     for attempt in range(1, SHAZAM_RETRIES + 1):
         try:
-            if attempt > 1: await asyncio.sleep(backoff)
+            if attempt > 1:
+                await asyncio.sleep(backoff)
             await limiter.wait()
             return await shazam_client.recognize(path)
         except Exception as e:
             errstr = str(e).lower()
             if '429' in errstr or 'too many' in errstr or 'rate' in errstr or 'timeout' in errstr:
-                print(f"⚠️ Shazam API temporary error (attempt {attempt}): {e} - backing off {backoff}s")
+                logger.warning('Shazam API temporary error (attempt %s): %s - backing off %ss', attempt, e, backoff)
                 backoff *= 2
                 continue
             else:
-                print(f"⚠️ Shazam API error: {e}")
+                logger.warning('Shazam API error: %s', e)
                 return {}
     return {}
 
@@ -385,23 +457,24 @@ async def process_file(file_path, shazam, limiter, semaphore):
         locked_path = f"{base}.processing{ext}"
         try:
             os.rename(file_path, locked_path)
-            print(f"🔒 Locked & Claimed: {filename_only} -> {os.path.basename(locked_path)}")
-        except Exception:
+            logger.info('Locked & Claimed: %s -> %s', filename_only, os.path.basename(locked_path))
+        except Exception as exc:
+            logger.warning('Unable to claim %s: %s', file_path, exc)
             return
 
         try:
-            print(f"📁 Analyzing structure for: {os.path.basename(locked_path)}")
+            logger.info('Analyzing structure for: %s', os.path.basename(locked_path))
             try:
                 test_audio = File(locked_path)
-                if test_audio is None: raise ValueError("Invalid structure")
+                if test_audio is None: raise ValueError('Invalid structure')
             except Exception:
-                print(f"❌ Corrupted Header: {filename_only} -> Moving to Unmanage")
+                logger.warning('Corrupted Header: %s -> Moving to Unmanage', filename_only)
                 target_un = os.path.join(UNMANAGE_DIR, filename_only)
                 os.makedirs(UNMANAGE_DIR, exist_ok=True)
                 shutil.move(locked_path, target_un)
                 return
 
-            print(f"🎵 Querying Shazam API for: {os.path.basename(locked_path)}...")
+            logger.info('Querying Shazam API for: %s', os.path.basename(locked_path))
             out = await call_shazam_with_retries(shazam, locked_path, limiter)
             artist, title, album, genre, date = None, None, None, None, None
             cover_bytes = None
@@ -427,14 +500,14 @@ async def process_file(file_path, shazam, limiter, semaphore):
                     match_year = re.search(r'\b(19\d\d|20\d\d)\b', str(date))
                     if match_year: date = match_year.group(1)
                         
-                print(f"🔍 Shazam Match: {artist} - {title}")
+                logger.info('Shazam Match: %s - %s', artist, title)
                 cover_url = track.get('images', {}).get('coverarthq')
                 if cover_url:
                     cover_bytes = await asyncio.to_thread(_download_cover, cover_url)
 
             # 2. กรณี Shazam ไม่เจอ -> ตรวจสอบและ "ซ่อมภาษาไทย" จาก Tag เดิมในไฟล์
             else:
-                print(f"❓ Shazam did not match {os.path.basename(locked_path)}. Falling back to internal tags...")
+                logger.info('Shazam did not match %s. Falling back to internal tags', os.path.basename(locked_path))
                 try:
                     audio_orig = File(locked_path, easy=True)
                     if audio_orig:
@@ -451,68 +524,85 @@ async def process_file(file_path, shazam, limiter, semaphore):
                             album = repair_thai_encoding(audio_orig.get('album', [title])[0])
                             genre = repair_thai_encoding(audio_orig.get('genre', [''])[0])
                             date = repair_thai_encoding(audio_orig.get('date', [''])[0])
-                            print(f"🛠️ File Tag RECOVERED successfully: {artist} - {title}")
+                            logger.info('File Tag RECOVERED successfully: %s - %s', artist, title)
                         else:
-                            print(f"⚠️ Tag Unreadable/Missing even after repair attempt: {filename_only}")
+                            logger.warning('Tag unreadable or missing after repair attempt: %s', filename_only)
                 except Exception as tag_err:
-                    print(f"⚠️ Error reading internal tags: {tag_err}")
+                    logger.warning('Error reading internal tags: %s', tag_err)
 
             # 3. จัดการย้ายและบันทึกผล
             if artist and title and is_valid_tag(artist) and is_valid_tag(title):
                 # ตรวจสอบชื่อ Album เผื่อกรณีเป็นค่าว่างหรือพัง
                 final_album = album if is_valid_tag(album) else title
                 
-                print(f"✍️ Writing clean tags to: {os.path.basename(locked_path)}")
+                logger.info('Writing clean tags to: %s', os.path.basename(locked_path))
                 success = safe_write_tags(locked_path, artist, final_album, title, genre, date)
                 
-                if cover_bytes: embed_artwork(locked_path, cover_bytes)
+                if cover_bytes:
+                    embed_artwork(locked_path, cover_bytes)
 
-                print(f"✨ Success Processing: {artist} - {title}")
+                logger.info('Success Processing: %s - %s', artist, title)
                 move_with_dedup(locked_path, artist, final_album, title, TAG_DIR, cover_bytes)
             else:
                 # ถ้าซ่อมไม่สำเร็จ หรือไม่มีข้อมูลจริง ๆ ส่งไป Unmanage
-                print(f"❓ Unmanageable (No tag or recovery failed): {filename_only} -> Moving to Unmanage")
+                logger.warning('Unmanageable (No tag or recovery failed): %s -> Moving to Unmanage', filename_only)
                 target_un = os.path.join(UNMANAGE_DIR, filename_only)
                 os.makedirs(UNMANAGE_DIR, exist_ok=True)
                 shutil.move(locked_path, target_un)
 
         except Exception as e:
-            print(f"⚠️ Error processing {filename_only}: {e}")
+            logger.error('Error processing %s: %s', filename_only, e)
             if os.path.exists(locked_path):
-                try: os.rename(locked_path, file_path)
-                except Exception: pass
+                try:
+                    os.rename(locked_path, file_path)
+                except Exception as exc:
+                    logger.warning('Unable to restore in-progress file %s: %s', locked_path, exc)
 
 async def tag_music():
     shazam = Shazam()
     limiter = AsyncRateLimiter(SHAZAM_DELAY)
-    semaphore = asyncio.Semaphore(3)
-    print(f"--- Starting internal HTTP health endpoint on port 5000 ---")
-    asyncio.create_task(start_health_server())
-    print(f"--- [{datetime.now().strftime('%H:%M:%S')}] Service Running (Advanced Thai Auto-Repair Mode) ---")
+    semaphore = asyncio.Semaphore(MAX_WORKERS)
+    logger.info('Starting internal HTTP health endpoint on port %s', HTTP_PORT)
+    health_runner = await start_health_server()
+    logger.info('Service Running (Advanced Thai Auto-Repair Mode)')
 
-    while True:
-        try:
-            all_files = []
-            for root, dirs, files in os.walk(WATCH_DIR):
-                for file in files:
-                    if file.lower().endswith(('.mp3', '.m4a', '.flac', '.wav')) and '.processing.' not in file.lower():
-                        all_files.append(os.path.join(root, file))
+    try:
+        while not shutdown_event.is_set():
+            try:
+                all_files = []
+                for root, dirs, files in os.walk(WATCH_DIR):
+                    for file in files:
+                        if file.lower().endswith(('.mp3', '.m4a', '.flac', '.wav')) and '.processing.' not in file.lower():
+                            all_files.append(os.path.join(root, file))
 
-            if not all_files:
-                await asyncio.sleep(60)
+                if not all_files:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=60)
+                    continue
+
+                logger.info('Found %d file(s) to process...', len(all_files))
+                random.shuffle(all_files)
+                tasks = [process_file(file_path, shazam, limiter, semaphore) for file_path in all_files]
+                await asyncio.gather(*tasks)
+
+            except asyncio.TimeoutError:
                 continue
+            except Exception as e:
+                logger.error('Global loop error: %s', e)
 
-            print(f"📂 Found {len(all_files)} file(s) to process...")
-            random.shuffle(all_files)
-            
-            tasks = [process_file(file_path, shazam, limiter, semaphore) for file_path in all_files]
-            await asyncio.gather(*tasks)
-
-        except Exception as e:
-            print(f"⚠️ Global Loop Error: {e}")
-        
-        await asyncio.sleep(INTERVAL)
+            await asyncio.wait_for(shutdown_event.wait(), timeout=INTERVAL)
+    finally:
+        await stop_health_server(health_runner)
+        logger.info('Shutdown complete')
 
 if __name__ == "__main__":
-    for d in [WATCH_DIR, TAG_DIR, UNMANAGE_DIR]: os.makedirs(d, exist_ok=True)
-    asyncio.run(tag_music())
+    setup_logging()
+    for d in [WATCH_DIR, TAG_DIR, UNMANAGE_DIR]:
+        os.makedirs(d, exist_ok=True)
+    loop = asyncio.get_event_loop()
+    configure_signal_handlers(loop)
+    try:
+        loop.run_until_complete(tag_music())
+    except KeyboardInterrupt:
+        logger.info('Keyboard interrupt received, shutting down...')
+    finally:
+        loop.close()

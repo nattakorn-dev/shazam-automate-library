@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  shazam-tagger:
+    build: .
+    container_name: shazam_tagger_service
+    restart: unless-stopped
+    ports:
+      - '5000:5000'
+    volumes:
+      - ./watch:/music/watch
+      - ./library:/music/library
+      - ./unmanage:/music/unmanage
+      - ./logs:/logs
+    environment:
+      - WATCH_DIR=/music/watch
+      - TAG_DIR=/music/library
+      - UNMANAGE_DIR=/music/unmanage
+      - LOG_FILE=/logs/tagger_service.log
+      - SHAZAM_DELAY=1.5
+      - INTERVAL=300
+      - HTTP_PORT=5000
