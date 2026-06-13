@@ -46,3 +46,52 @@ services:
       - path_to_unmanage:/music/unmanage
 
 
+
+
+## Run examples
+
+Below are simple examples to run the service locally (development) and with Docker Compose.
+
+**Run locally (virtualenv)**
+
+1. Create a Python 3.11 virtual environment and install dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+2. Create directories and run:
+
+```bash
+mkdir -p watch library unmanage logs
+export WATCH_DIR=$(pwd)/watch
+export TAG_DIR=$(pwd)/library
+export UNMANAGE_DIR=$(pwd)/unmanage
+export LOG_FILE=$(pwd)/logs/tagger_service.log
+python tagger_service.py
+```
+
+**Run with Docker Compose**
+
+Build and start the service with the provided `docker-compose.yml`:
+
+```bash
+docker compose build
+docker compose up -d
+# check logs
+docker compose logs -f
+```
+
+The `docker-compose.yml` mounts local folders into the container at `/music/watch`, `/music/library`, `/music/unmanage` and `/logs` so you can inspect files on the host.
+
+**Environment variables**
+
+- `WATCH_DIR`, `TAG_DIR`, `UNMANAGE_DIR` — paths inside container where files are read/written (defaults in compose are correct for the provided mounts).
+- `LOG_FILE` — path for rotating logs (defaults to `/logs/tagger_service.log`).
+- `SHAZAM_DELAY`, `SHAZAM_RETRIES`, `INTERVAL`, `MAX_WORKERS`, `HTTP_PORT` — tune service behavior.
+
+Note: this project intentionally does not load a local `.env` file; configure variables via your environment, the `docker-compose` environment block, or your container orchestrator.
+
+
