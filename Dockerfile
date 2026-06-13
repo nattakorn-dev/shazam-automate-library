@@ -17,7 +17,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir \
     shazamio==0.8.1 \
     mutagen==1.47.0 \
-    python-dotenv==1.2.2 \
     aiohttp==3.9.5 \
     requests==2.34.2
 

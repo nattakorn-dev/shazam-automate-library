@@ -10,7 +10,6 @@ import requests
 from logging.handlers import RotatingFileHandler
 from aiohttp import web
 from datetime import datetime
-from dotenv import load_dotenv
 from shazamio import Shazam
 from mutagen import File
 from mutagen.mp3 import MP3
@@ -19,8 +18,7 @@ import mutagen.id3 as id3
 from mutagen.wave import WAVE
 from mutagen.mp4 import MP4
 
-# Load .env values if present
-load_dotenv()
+# Note: .env loading intentionally omitted (use environment variables)
 
 # Rate limit settings (seconds between Shazam API calls)
 SHAZAM_DELAY = float(os.getenv('SHAZAM_DELAY', '1.5'))
