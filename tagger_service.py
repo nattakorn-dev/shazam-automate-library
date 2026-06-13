@@ -181,23 +181,78 @@ def embed_artwork(file_path, image_bytes):
         print(f"⚠️ Artwork embedding failed for {os.path.basename(file_path)}: {e}")
     return False
 
+def find_existing_folder_case_insensitive(parent_dir, folder_name):
+    """
+    ค้นหา Folder artist/album ที่มีชื่อเดียวกัน 
+    โดยไม่สนใจตัวพิมพ์ใหญ่-เล็ก (SMB Compatible - Case-Insensitive)
+    """
+    try:
+        if not os.path.exists(parent_dir):
+            return None
+        
+        for folder in os.listdir(parent_dir):
+            folder_path = os.path.join(parent_dir, folder)
+            if os.path.isdir(folder_path):
+                # เทียบชื่อโดยไม่สนใจตัวพิมพ์ใหญ่-เล็ก
+                if folder.lower() == folder_name.lower():
+                    return folder_path
+    except Exception:
+        pass
+    return None
+
+def find_existing_file_case_insensitive(target_dir, title_safe):
+    """
+    ค้นหาไฟล์ที่มีชื่อเดียวกัน (โดยไม่สนใจนามสกุล) ในแบบ Case-Insensitive 
+    สำหรับการเข้ากันได้กับ SMB Protocol
+    """
+    try:
+        if not os.path.exists(target_dir):
+            return None
+        
+        for file in os.listdir(target_dir):
+            file_base = os.path.splitext(file)[0]
+            # เทียบชื่อโดยไม่สนใจตัวพิมพ์ใหญ่-เล็ก และนามสกุล
+            if file_base.lower() == title_safe.lower():
+                full_path = os.path.join(target_dir, file)
+                if os.path.isfile(full_path):
+                    return full_path
+    except Exception:
+        pass
+    return None
+
 def move_with_dedup(source_file, artist, album, title, target_base, cover_bytes=None):
-    """ ย้ายไฟล์ไปยัง Folder Artist/Album พร้อมเช็คไฟล์ซ้ำที่คุณภาพต่ำกว่า """
+    """ ย้ายไฟล์ไปยัง Folder Artist/Album พร้อมเช็คไฟล์ซ้ำที่คุณภาพต่ำกว่า 
+    (SMB Compatible - Case-Insensitive สำหรับ Folder & File) """
     ext = os.path.splitext(source_file)[1].lower()
     artist_folder, album_folder, file_name = safe_truncate_path(artist, album, title, ext, target_base)
 
-    target_dir = os.path.join(target_base, artist_folder, album_folder)
+    # ค้นหา artist folder แบบ case-insensitive
+    artist_path = find_existing_folder_case_insensitive(target_base, artist_folder)
+    if not artist_path:
+        artist_path = os.path.join(target_base, artist_folder)
+    
+    # ค้นหา album folder แบบ case-insensitive
+    album_path = find_existing_folder_case_insensitive(artist_path, album_folder)
+    if not album_path:
+        album_path = os.path.join(artist_path, album_folder)
+    
+    target_dir = album_path
     os.makedirs(target_dir, exist_ok=True)
     target_path = os.path.join(target_dir, file_name)
+    
+    # ค้นหาไฟล์ที่มีชื่อเดียวกัน (ไม่สนใจนามสกุล)
+    file_base = os.path.splitext(file_name)[0]
+    existing_file = find_existing_file_case_insensitive(target_dir, file_base)
 
-    if os.path.exists(target_path):
+    if existing_file:
         print(f"🔍 Comparing quality for duplicate: {file_name}...")
-        curr_bitrate, curr_size = get_audio_quality(target_path)
+        curr_bitrate, curr_size = get_audio_quality(existing_file)
         new_bitrate, new_size = get_audio_quality(source_file)
 
         if (new_bitrate > curr_bitrate) or (new_bitrate == curr_bitrate and new_size > curr_size):
-            print(f"♻️ Replacing: {file_name} ({new_bitrate//1000}k > {curr_bitrate//1000}k)")
-            os.remove(target_path)
+            existing_filename = os.path.basename(existing_file)
+            print(f"♻️ Replacing: {existing_filename} ({new_bitrate//1000}k > {curr_bitrate//1000}k)")
+            os.remove(existing_file)
             shutil.move(source_file, target_path)
         else:
             print(f"⏭️ Lower quality already exists. Skipping: {file_name}")
