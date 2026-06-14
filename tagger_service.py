@@ -437,12 +437,22 @@ async def call_shazam_with_retries(shazam_client, path, limiter):
             return await shazam_client.recognize(path)
         except Exception as e:
             errstr = str(e).lower()
-            if '429' in errstr or 'too many' in errstr or 'rate' in errstr or 'timeout' in errstr:
-                logger.warning('Shazam API temporary error (attempt %s): %s - backing off %ss', attempt, e, backoff)
+            # Retryable errors: rate limit, timeout, JSON decode errors, connection errors
+            is_retryable = any(keyword in errstr for keyword in [
+                '429', 'too many', 'rate', 'timeout', 
+                'failed to decode', 'json', 'connection',
+                'reset by peer', 'broken pipe', 'timeout'
+            ])
+            
+            if is_retryable and attempt < SHAZAM_RETRIES:
+                logger.warning('Shazam API temporary error (attempt %s/%s): %s - backing off %ss', 
+                              attempt, SHAZAM_RETRIES, e, backoff)
                 backoff *= 2
                 continue
             else:
-                logger.warning('Shazam API error: %s', e)
+                logger.warning('Shazam API error (attempt %s/%s): %s', attempt, SHAZAM_RETRIES, e)
+                if attempt == SHAZAM_RETRIES:
+                    logger.warning('Max retries reached for: %s', os.path.basename(path))
                 return {}
     return {}
 
