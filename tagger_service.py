@@ -599,7 +599,12 @@ async def tag_music():
             except Exception as e:
                 logger.error('Global loop error: %s', e)
 
-            await asyncio.wait_for(shutdown_event.wait(), timeout=INTERVAL)
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=INTERVAL)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
     finally:
         await stop_health_server(health_runner)
         logger.info('Shutdown complete')
