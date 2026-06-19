@@ -169,8 +169,16 @@ def get_audio_quality(file_path):
 def clean_filename(text):
     """ ล้างอักขระที่ระบบปฏิบัติการไม่รองรับในการตั้งชื่อไฟล์ """
     if not text: return "Unknown"
-    clean = re.sub(r'[\\/*?:"<>|]', "", str(text))
+    clean = re.sub(r'[\x00-\x1f\x7f\\/*?:"<>|]', "", str(text))
     return clean.strip()
+
+
+def sanitize_tag_value(text):
+    """Remove embedded nulls and control characters from tag values."""
+    if not text:
+        return ""
+    return re.sub(r'[\x00-\x1f\x7f]+', "", str(text)).strip()
+
 
 def safe_truncate_path(artist, album, title, ext, base_dir="/music/tag", max_filename=200):
     """ Truncate artist/album/title to keep full path under filesystem limits. """
@@ -369,6 +377,11 @@ def move_with_dedup(source_file, artist, album, title, target_base, cover_bytes=
 
 def safe_write_tags(file_path, artist, album, title, genre=None, date=None):
     """ เขียน Tag (UTF-8) ลงในไฟล์เสียงอย่างปลอดภัย รองรับหลายนามสกุล """
+    artist = sanitize_tag_value(artist)
+    album = sanitize_tag_value(album)
+    title = sanitize_tag_value(title)
+    genre = sanitize_tag_value(genre)
+    date = sanitize_tag_value(date)
     ext = os.path.splitext(file_path)[1].lower()
     
     try:
@@ -561,7 +574,12 @@ async def process_file(file_path, shazam, limiter, semaphore):
             if artist and title and is_valid_tag(artist) and is_valid_tag(title):
                 # ตรวจสอบชื่อ Album เผื่อกรณีเป็นค่าว่างหรือพัง
                 final_album = album if is_valid_tag(album) else title
-                
+                artist = sanitize_tag_value(artist)
+                title = sanitize_tag_value(title)
+                final_album = sanitize_tag_value(final_album)
+                genre = sanitize_tag_value(genre)
+                date = sanitize_tag_value(date)
+
                 logger.info('Writing clean tags to: %s', os.path.basename(locked_path))
                 success = safe_write_tags(locked_path, artist, final_album, title, genre, date)
                 
