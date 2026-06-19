@@ -174,22 +174,39 @@ def clean_filename(text):
 
 def safe_truncate_path(artist, album, title, ext, base_dir="/music/tag", max_filename=200):
     """ Truncate artist/album/title to keep full path under filesystem limits. """
-    artist_safe = clean_filename(artist)[:100]
-    album_safe = clean_filename(album)[:100]
-    title_safe = clean_filename(title)[:max_filename]
-    
+    def truncate_utf8(value, max_bytes):
+        value = clean_filename(value)
+        encoded = value.encode('utf-8')
+        if len(encoded) <= max_bytes:
+            return value
+        low, high = 0, len(value)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if len(value[:mid].encode('utf-8')) <= max_bytes:
+                low = mid
+            else:
+                high = mid - 1
+        return value[:low].rstrip()
+
+    artist_safe = truncate_utf8(artist, 200)
+    album_safe = truncate_utf8(album, 200)
+    title_safe = truncate_utf8(title, max_filename)
+
     filename = f"{title_safe}{ext}"
     if len(filename.encode('utf-8')) > 250:
-        title_safe = clean_filename(title)[:150]
+        title_safe = truncate_utf8(title, 220 - len(ext.encode('utf-8')))
         filename = f"{title_safe}{ext}"
         if len(filename.encode('utf-8')) > 250:
-            title_safe = clean_filename(title)[:50]
+            title_safe = truncate_utf8(title, 180 - len(ext.encode('utf-8')))
             filename = f"{title_safe}{ext}"
-    
+        if len(filename.encode('utf-8')) > 250:
+            title_safe = truncate_utf8(title, 120 - len(ext.encode('utf-8')))
+            filename = f"{title_safe}{ext}"
+
     full_path = os.path.join(base_dir, artist_safe, album_safe, filename)
     if len(full_path.encode('utf-8')) > 4000:
-        album_safe = clean_filename(album)[:50]
-        artist_safe = clean_filename(artist)[:50]
+        album_safe = truncate_utf8(album, 120)
+        artist_safe = truncate_utf8(artist, 120)
         full_path = os.path.join(base_dir, artist_safe, album_safe, filename)
     
     return artist_safe, album_safe, filename
