@@ -241,7 +241,7 @@ def embed_artwork(file_path, image_bytes):
             audio.add(id3.APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=image_bytes))
             audio.save(file_path)
             return True
-        elif ext in ('.m4a', '.mp4'):
+        elif ext in ('.m4a', '.mp4', '.m4'):
             from mutagen.mp4 import MP4, MP4Cover
             audio = MP4(file_path)
             audio['covr'] = [MP4Cover(image_bytes, imageformat=MP4Cover.FORMAT_JPEG)]
@@ -264,6 +264,41 @@ def embed_artwork(file_path, image_bytes):
             audio.tags.add(id3.APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=image_bytes))
             audio.save()
             return True
+        elif ext == '.ogg':
+            try:
+                from mutagen.oggvorbis import OggVorbis
+                from mutagen.flac import Picture
+                import base64
+                pic = Picture()
+                pic.data = image_bytes
+                pic.type = 3
+                pic.mime = 'image/jpeg'
+                pic.desc = 'Cover'
+                encoded = base64.b64encode(pic.write()).decode('ascii')
+                audio = OggVorbis(file_path)
+                audio['metadata_block_picture'] = [encoded]
+                audio.save()
+                return True
+            except Exception as e:
+                logger.warning('OGG artwork embedding failed for %s: %s', os.path.basename(file_path), e)
+        elif ext in ('.wma', '.asf'):
+            try:
+                from mutagen.asf import ASF, Picture as ASF_Picture
+                audio = ASF(file_path)
+                pic = ASF_Picture()
+                pic.data = image_bytes
+                pic.mime_type = 'image/jpeg'
+                pic.type = 3
+                # Append picture to WM/Picture field (mutagen handles encoding)
+                pics = audio.tags.get('WM/Picture', []) if audio.tags is not None else []
+                pics.append(pic)
+                if audio.tags is None:
+                    audio.tags = {}
+                audio.tags['WM/Picture'] = pics
+                audio.save()
+                return True
+            except Exception as e:
+                logger.warning('WMA/ASF artwork embedding failed for %s: %s', os.path.basename(file_path), e)
     except Exception as e:
         logger.warning('Artwork embedding failed for %s: %s', os.path.basename(file_path), e)
     return False
@@ -418,7 +453,7 @@ def safe_write_tags(file_path, artist, album, title, genre=None, date=None):
             if date and is_valid_tag(date): tags['TDRC'] = id3.TDRC(encoding=3, text=date)
             tags.save(file_path)
             return True
-        elif ext in ('.m4a', '.mp4'):
+        elif ext in ('.m4a', '.mp4', '.m4'):
             audio = MP4(file_path)
             audio['\xa9ART'] = [artist]
             audio['\xa9nam'] = [title]
@@ -427,6 +462,19 @@ def safe_write_tags(file_path, artist, album, title, genre=None, date=None):
             if date and is_valid_tag(date): audio['\xa9day'] = [date]
             audio.save()
             return True
+        elif ext == '.ogg':
+            try:
+                from mutagen.oggvorbis import OggVorbis
+                audio = OggVorbis(file_path)
+                audio['artist'] = [artist]
+                audio['title'] = [title]
+                audio['album'] = [album]
+                if genre and is_valid_tag(genre): audio['genre'] = [genre]
+                if date and is_valid_tag(date): audio['date'] = [date]
+                audio.save()
+                return True
+            except Exception:
+                pass
         elif ext == '.wav':
             try:
                 audio = WAVE(file_path)
@@ -617,8 +665,8 @@ async def tag_music():
                 all_files = []
                 for root, dirs, files in os.walk(WATCH_DIR):
                     for file in files:
-                        if file.lower().endswith(('.mp3', '.m4a', '.flac', '.wav')) and '.processing.' not in file.lower():
-                            all_files.append(os.path.join(root, file))
+                                if file.lower().endswith(('.mp3', '.m4a', '.m4', '.flac', '.wav', '.aif', '.aiff', '.dsf', '.ogg', '.wma')) and '.processing.' not in file.lower():
+                                    all_files.append(os.path.join(root, file))
 
                 if not all_files:
                     await asyncio.wait_for(shutdown_event.wait(), timeout=60)
