@@ -23,6 +23,7 @@ from mutagen.mp4 import MP4
 # Rate limit settings (seconds between Shazam API calls)
 SHAZAM_DELAY = float(os.getenv('SHAZAM_DELAY', '1.5'))
 SHAZAM_RETRIES = int(os.getenv('SHAZAM_RETRIES', '3'))
+SHAZAM_TIMEOUT = float(os.getenv('SHAZAM_TIMEOUT', '30'))
 
 # Service configuration
 WATCH_DIR = os.getenv('WATCH_DIR', '/music/watch')
@@ -512,14 +513,18 @@ async def call_shazam_with_retries(shazam_client, path, limiter):
             if attempt > 1:
                 await asyncio.sleep(backoff)
             await limiter.wait()
-            return await shazam_client.recognize(path)
+            return await asyncio.wait_for(shazam_client.recognize(path), timeout=SHAZAM_TIMEOUT)
+        except asyncio.TimeoutError as e:
+            errstr = 'timeout'
+            logger.warning('Shazam API timeout (attempt %s/%s): %s', attempt, SHAZAM_RETRIES, e)
+            is_retryable = attempt < SHAZAM_RETRIES
         except Exception as e:
             errstr = str(e).lower()
             # Retryable errors: rate limit, timeout, JSON decode errors, connection errors
             is_retryable = any(keyword in errstr for keyword in [
                 '429', 'too many', 'rate', 'timeout', 
                 'failed to decode', 'json', 'connection',
-                'reset by peer', 'broken pipe', 'timeout'
+                'reset by peer', 'broken pipe'
             ])
             
             if is_retryable and attempt < SHAZAM_RETRIES:
