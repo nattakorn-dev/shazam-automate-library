@@ -21,7 +21,7 @@ from mutagen.mp4 import MP4
 # Note: .env loading intentionally omitted (use environment variables)
 
 # Rate limit settings (seconds between Shazam API calls)
-SHAZAM_DELAY = float(os.getenv('SHAZAM_DELAY', '1.5'))
+SHAZAM_DELAY = float(os.getenv('SHAZAM_DELAY', '3'))
 SHAZAM_RETRIES = int(os.getenv('SHAZAM_RETRIES', '3'))
 SHAZAM_TIMEOUT = float(os.getenv('SHAZAM_TIMEOUT', '30'))
 
