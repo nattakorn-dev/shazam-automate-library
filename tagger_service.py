@@ -33,6 +33,7 @@ INTERVAL = int(os.getenv('INTERVAL', '300'))
 LOG_FILE = os.getenv('LOG_FILE', '/logs/tagger_service.log')
 MAX_WORKERS = int(os.getenv('MAX_WORKERS', '3'))
 HTTP_PORT = int(os.getenv('HTTP_PORT', '5000'))
+FILE_OP_TIMEOUT = float(os.getenv('FILE_OP_TIMEOUT', '60'))
 
 # ปิด Log ของ Mutagen เพื่อความสะอาดของหน้าจอ
 logging.getLogger('mutagen').setLevel(logging.ERROR)
@@ -634,13 +635,39 @@ async def process_file(file_path, shazam, limiter, semaphore):
                 date = sanitize_tag_value(date)
 
                 logger.info('Writing clean tags to: %s', os.path.basename(locked_path))
-                success = safe_write_tags(locked_path, artist, final_album, title, genre, date)
-                
-                if cover_bytes:
-                    embed_artwork(locked_path, cover_bytes)
+                try:
+                    success = await asyncio.wait_for(
+                        asyncio.to_thread(safe_write_tags, locked_path, artist, final_album, title, genre, date),
+                        timeout=FILE_OP_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning('Tag write timed out for %s', os.path.basename(locked_path))
+                    success = False
+                except Exception as exc:
+                    logger.warning('Tag write error for %s: %s', os.path.basename(locked_path), exc)
+                    success = False
+
+                if cover_bytes and success:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(embed_artwork, locked_path, cover_bytes),
+                            timeout=FILE_OP_TIMEOUT
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning('Artwork embedding timed out for %s', os.path.basename(locked_path))
+                    except Exception as exc:
+                        logger.warning('Artwork embedding error for %s: %s', os.path.basename(locked_path), exc)
 
                 logger.info('Success Processing: %s - %s', artist, title)
-                move_with_dedup(locked_path, artist, final_album, title, target_dir, cover_bytes)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(move_with_dedup, locked_path, artist, final_album, title, target_dir, cover_bytes),
+                        timeout=FILE_OP_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning('File move timed out for %s', os.path.basename(locked_path))
+                except Exception as exc:
+                    logger.warning('File move error for %s: %s', os.path.basename(locked_path), exc)
             else:
                 # ถ้าซ่อมไม่สำเร็จ หรือไม่มีข้อมูลจริง ๆ ส่งไป Unmanage
                 logger.warning('Unmanageable (No tag or recovery failed): %s -> Moving to Unmanage', filename_only)
@@ -680,7 +707,10 @@ async def tag_music():
                 logger.info('Found %d file(s) to process...', len(all_files))
                 random.shuffle(all_files)
                 tasks = [process_file(file_path, shazam, limiter, semaphore) for file_path in all_files]
-                await asyncio.gather(*tasks)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error('Worker task exception: %s', result)
 
             except asyncio.TimeoutError:
                 continue
